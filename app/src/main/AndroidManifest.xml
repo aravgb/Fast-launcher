@@ -27,5 +27,16 @@
             </intent-filter>
         </activity>
 
+        <!-- Служба для блокировки экрана двойным тапом без сброса биометрии -->
+        <service
+            android:name=".LockService"
+            android:exported="true"
+            android:label="FastLauncher (Блокировка экрана)"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+        </service>
+
     </application>
 </manifest>
