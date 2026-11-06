@@ -7,8 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -32,7 +37,9 @@ import java.util.concurrent.Executors
 data class AppItem(
     val label: String,
     val packageName: String,
-    val icon: Drawable
+    val icon: Drawable,
+    val isFolder: Boolean = false,
+    val folderName: String = ""
 )
 
 class MainActivity : Activity() {
@@ -40,7 +47,7 @@ class MainActivity : Activity() {
     private val executor = Executors.newSingleThreadExecutor()
     private val allApps = mutableListOf<AppItem>()
     private val filteredApps = mutableListOf<AppItem>()
-    private val homeApps = mutableListOf<AppItem>()
+    private val homeItems = mutableListOf<AppItem>()
     private val dockApps = mutableListOf<AppItem>()
 
     private lateinit var prefs: SharedPreferences
@@ -107,10 +114,10 @@ class MainActivity : Activity() {
                 val diffX = e2.x - e1.x
                 if (Math.abs(diffY) > Math.abs(diffX) && Math.abs(diffY) > dp(60)) {
                     if (diffY < 0) {
-                        openDrawer() // Свайп вверх открывает меню всех приложений
+                        openDrawer()
                         return true
                     } else if (diffY > 0 && drawerLayer.visibility != View.VISIBLE) {
-                        expandNotifications() // Свайп вниз опускает шторку уведомлений
+                        expandNotifications()
                         return true
                     }
                 }
@@ -132,7 +139,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // Блок часов и даты
         val clockBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -143,6 +149,10 @@ class MainActivity : Activity() {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     })
                 } catch (_: Exception) {}
+            }
+            setOnLongClickListener {
+                showHomeOptionsDialog()
+                true
             }
         }
 
@@ -177,8 +187,8 @@ class MainActivity : Activity() {
         clockBox.addView(dateClock)
         clockBox.addView(batteryText)
 
-        // Сетка избранных приложений на рабочем столе
-        homeAdapter = AppGridAdapter(homeApps)
+        // Сетка ярлыков и папок на рабочем столе
+        homeAdapter = AppGridAdapter(homeItems)
         homeGrid = GridView(this).apply {
             numColumns = 4
             verticalSpacing = dp(18)
@@ -199,31 +209,43 @@ class MainActivity : Activity() {
             }
 
             setOnItemClickListener { _, _, position, _ ->
-                if (position in homeApps.indices) {
-                    launchApp(homeApps[position].packageName)
+                if (position in homeItems.indices) {
+                    val item = homeItems[position]
+                    if (item.isFolder) {
+                        openFolderDialog(item.folderName)
+                    } else {
+                        launchApp(item.packageName)
+                    }
                 }
             }
 
             setOnItemLongClickListener { _, _, position, _ ->
-                if (position in homeApps.indices) {
-                    showHomeAppMenu(homeApps[position], isDock = false)
+                if (position in homeItems.indices) {
+                    val item = homeItems[position]
+                    if (item.isFolder) {
+                        showFolderManageMenu(item.folderName)
+                    } else {
+                        showHomeAppMenu(item, isDock = false)
+                    }
                 }
                 true
             }
         }
 
-        // Подсказка над док-баром
         val swipeHint = TextView(this).apply {
-            text = "⌃ Свайп вверх — все приложения"
+            text = "⌃ Свайп вверх — все приложения  |  Удержание — меню"
             setTextColor(Color.parseColor("#AAFFFFFF"))
             textSize = 11f
             gravity = Gravity.CENTER
             setPadding(0, dp(4), 0, dp(8))
             setShadowLayer(3f, 0f, 1f, Color.BLACK)
             setOnClickListener { openDrawer() }
+            setOnLongClickListener {
+                showHomeOptionsDialog()
+                true
+            }
         }
 
-        // Нижняя панель (Док-бар)
         val dockBg = GradientDrawable().apply {
             setColor(Color.parseColor("#66111111"))
             cornerRadius = dp(28).toFloat()
@@ -253,6 +275,18 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
 
+        // Верхняя панель: Поиск + Кнопка настроек/скрытых приложений
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(12)
+            }
+        }
+
         val searchBg = GradientDrawable().apply {
             setColor(Color.parseColor("#99282828"))
             cornerRadius = dp(24).toFloat()
@@ -267,11 +301,10 @@ class MainActivity : Activity() {
             setSingleLine(true)
             setPadding(dp(16), dp(10), dp(16), dp(10))
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = dp(12)
-            }
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
 
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -281,6 +314,29 @@ class MainActivity : Activity() {
                 override fun afterTextChanged(s: Editable?) {}
             })
         }
+
+        val settingsBtnBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor("#99282828"))
+        }
+
+        val settingsBtn = TextView(this).apply {
+            text = "⚙"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            gravity = Gravity.CENTER
+            background = settingsBtnBg
+            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply {
+                leftMargin = dp(8)
+            }
+            setOnClickListener {
+                hideKeyboard()
+                showHomeOptionsDialog()
+            }
+        }
+
+        topBar.addView(searchInput)
+        topBar.addView(settingsBtn)
 
         drawerAdapter = AppGridAdapter(filteredApps)
         drawerGrid = GridView(this).apply {
@@ -313,13 +369,279 @@ class MainActivity : Activity() {
             }
         }
 
-        drawerLayer.addView(searchInput)
+        drawerLayer.addView(topBar)
         drawerLayer.addView(drawerGrid)
 
         root.addView(homeLayer)
         root.addView(drawerLayer)
         setContentView(root)
     }
+
+    // ================= РАБОТА С ПАПКАМИ =================
+
+    private fun buildFolderIcon(folderApps: List<AppItem>): Drawable {
+        val size = dp(54)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#99222222")
+            style = Paint.Style.FILL
+        }
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#66FFFFFF")
+            style = Paint.Style.STROKE
+            strokeWidth = dp(1).toFloat()
+        }
+
+        val pad = dp(2).toFloat()
+        val rect = RectF(pad, pad, size - pad, size - pad)
+        val radius = dp(14).toFloat()
+        canvas.drawRoundRect(rect, radius, radius, bgPaint)
+        canvas.drawRoundRect(rect, radius, radius, strokePaint)
+
+        val innerPad = dp(8)
+        val gap = dp(4)
+        val miniSize = (size - innerPad * 2 - gap) / 2
+
+        for (i in 0 until minOf(4, folderApps.size)) {
+            val col = i % 2
+            val row = i / 2
+            val left = innerPad + col * (miniSize + gap)
+            val top = innerPad + row * (miniSize + gap)
+            val iconCopy = folderApps[i].icon.constantState?.newDrawable()?.mutate() ?: folderApps[i].icon
+            iconCopy.setBounds(left, top, left + miniSize, top + miniSize)
+            iconCopy.draw(canvas)
+        }
+
+        return BitmapDrawable(resources, bitmap)
+    }
+
+    private fun showCreateFolderDialog(initialAppPkg: String? = null) {
+        val input = EditText(this).apply {
+            hint = "Например: Игры или Работа"
+            setSingleLine(true)
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Новая папка")
+            .setView(input)
+            .setPositiveButton("Создать") { _, _ ->
+                val rawName = input.text.toString().trim().replace(",", " ").replace(":", " ")
+                if (rawName.isNotEmpty()) {
+                    val folderToken = "folder:$rawName"
+                    val homeList = getSavedList("home_apps")
+                    if (!homeList.contains(folderToken)) {
+                        if (homeList.size >= 16) homeList.removeAt(0)
+                        homeList.add(folderToken)
+                        saveList("home_apps", homeList)
+                    }
+                    if (initialAppPkg != null) {
+                        addAppToFolder(rawName, initialAppPkg)
+                    } else {
+                        syncFavorites()
+                        showSelectAppsForFolderDialog(rawName)
+                    }
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showChooseFolderDialog(pkg: String) {
+        val folders = getSavedList("home_apps")
+            .filter { it.startsWith("folder:") }
+            .map { it.removePrefix("folder:") }
+
+        val options = folders.toMutableList()
+        options.add("+ Создать новую папку")
+
+        AlertDialog.Builder(this)
+            .setTitle("Выберите папку")
+            .setItems(options.toTypedArray()) { _, which ->
+                if (which == folders.size) {
+                    showCreateFolderDialog(initialAppPkg = pkg)
+                } else {
+                    addAppToFolder(folders[which], pkg)
+                }
+            }
+            .show()
+    }
+
+    private fun addAppToFolder(folderName: String, pkg: String) {
+        val key = "folder_items_$folderName"
+        val list = getSavedList(key)
+        if (!list.contains(pkg)) {
+            list.add(pkg)
+            saveList(key, list)
+            syncFavorites()
+            Toast.makeText(this, "Добавлено в папку «$folderName»", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openFolderDialog(folderName: String) {
+        val key = "folder_items_$folderName"
+        val map = allApps.associateBy { it.packageName }
+        val appsInFolder = getSavedList(key).mapNotNull { map[it] }.toMutableList()
+
+        if (appsInFolder.isEmpty()) {
+            showSelectAppsForFolderDialog(folderName)
+            return
+        }
+
+        var dialog: AlertDialog? = null
+
+        val folderGrid = GridView(this).apply {
+            numColumns = 4
+            verticalSpacing = dp(16)
+            horizontalSpacing = dp(8)
+            setPadding(dp(12), dp(16), dp(12), dp(16))
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            gravity = Gravity.CENTER
+            adapter = AppGridAdapter(appsInFolder)
+
+            setOnItemClickListener { _, _, pos, _ ->
+                if (pos in appsInFolder.indices) {
+                    dialog?.dismiss()
+                    launchApp(appsInFolder[pos].packageName)
+                }
+            }
+
+            setOnItemLongClickListener { _, _, pos, _ ->
+                if (pos in appsInFolder.indices) {
+                    val target = appsInFolder[pos]
+                    val currentList = getSavedList(key)
+                    currentList.remove(target.packageName)
+                    saveList(key, currentList)
+                    syncFavorites()
+                    dialog?.dismiss()
+                    Toast.makeText(this@MainActivity, "Убрано из папки", Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle(folderName)
+            .setView(folderGrid)
+            .setNeutralButton("+ Приложения") { _, _ ->
+                showSelectAppsForFolderDialog(folderName)
+            }
+            .setPositiveButton("Закрыть", null)
+            .create()
+
+        dialog.show()
+    }
+
+    private fun showSelectAppsForFolderDialog(folderName: String) {
+        if (allApps.isEmpty()) return
+        val key = "folder_items_$folderName"
+        val currentSet = getSavedList(key).toMutableSet()
+
+        val labels = allApps.map { it.label }.toTypedArray()
+        val checked = BooleanArray(allApps.size) { i ->
+            currentSet.contains(allApps[i].packageName)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Приложения в «$folderName»")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                val pkg = allApps[which].packageName
+                if (isChecked) currentSet.add(pkg) else currentSet.remove(pkg)
+            }
+            .setPositiveButton("Сохранить") { _, _ ->
+                saveList(key, currentSet.toList())
+                syncFavorites()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showFolderManageMenu(folderName: String) {
+        val options = arrayOf(
+            "Выбрать приложения для папки",
+            "Переименовать папку",
+            "Удалить папку с экрана"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Папка «$folderName»")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showSelectAppsForFolderDialog(folderName)
+                    1 -> showRenameFolderDialog(folderName)
+                    2 -> {
+                        removePackageFromList("home_apps", "folder:$folderName")
+                        prefs.edit().remove("folder_items_$folderName").apply()
+                        syncFavorites()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun showRenameFolderDialog(oldName: String) {
+        val input = EditText(this).apply {
+            setText(oldName)
+            setSingleLine(true)
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Переименовать папку")
+            .setView(input)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val newName = input.text.toString().trim().replace(",", " ").replace(":", " ")
+                if (newName.isNotEmpty() && newName != oldName) {
+                    val homeList = getSavedList("home_apps").map {
+                        if (it == "folder:$oldName") "folder:$newName" else it
+                    }
+                    val folderItems = getSavedList("folder_items_$oldName")
+                    saveList("folder_items_$newName", folderItems)
+                    prefs.edit().remove("folder_items_$oldName").apply()
+                    saveList("home_apps", homeList)
+                    syncFavorites()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    // ================= СКРЫТИЕ ПРИЛОЖЕНИЙ =================
+
+    private fun hideApp(app: AppItem) {
+        val hidden = getSavedList("hidden_apps")
+        if (!hidden.contains(app.packageName)) {
+            hidden.add(app.packageName)
+            saveList("hidden_apps", hidden)
+            filterApps(searchInput.text.toString())
+            Toast.makeText(this, "${app.label} скрыто из меню", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showHiddenAppsDialog() {
+        if (allApps.isEmpty()) return
+        val hiddenSet = getSavedList("hidden_apps").toMutableSet()
+
+        val labels = allApps.map { it.label }.toTypedArray()
+        val checked = BooleanArray(allApps.size) { i ->
+            hiddenSet.contains(allApps[i].packageName)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Скрытые приложения (отметьте ненужные)")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                val pkg = allApps[which].packageName
+                if (isChecked) hiddenSet.add(pkg) else hiddenSet.remove(pkg)
+            }
+            .setPositiveButton("Сохранить") { _, _ ->
+                saveList("hidden_apps", hiddenSet.toList())
+                filterApps(searchInput.text.toString())
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    // ================= НАВИГАЦИЯ И МЕНЮ =================
 
     private fun updateDockUI() {
         dockContainer.removeAllViews()
@@ -340,7 +662,6 @@ class MainActivity : Activity() {
             dockContainer.addView(iconView)
         }
 
-        // Центральная кнопка открытия меню всех приложений
         val menuBtnBg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(Color.parseColor("#44FFFFFF"))
@@ -390,7 +711,9 @@ class MainActivity : Activity() {
     private fun showDrawerAppMenu(app: AppItem) {
         val options = arrayOf(
             "Добавить на главный экран",
+            "Добавить в папку...",
             "Закрепить в нижней панели (Док)",
+            "Скрыть приложение из меню",
             "О приложении (Удалить / Остановить)"
         )
         AlertDialog.Builder(this)
@@ -398,8 +721,10 @@ class MainActivity : Activity() {
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> addPackageToList("home_apps", app.packageName, maxCount = 16)
-                    1 -> addPackageToList("dock_apps", app.packageName, maxCount = 4)
-                    2 -> openAppSettings(app.packageName)
+                    1 -> showChooseFolderDialog(app.packageName)
+                    2 -> addPackageToList("dock_apps", app.packageName, maxCount = 4)
+                    3 -> hideApp(app)
+                    4 -> openAppSettings(app.packageName)
                 }
             }
             .show()
@@ -409,6 +734,7 @@ class MainActivity : Activity() {
         val removeLabel = if (isDock) "Убрать из нижней панели" else "Убрать с главного экрана"
         val options = arrayOf(
             removeLabel,
+            "Переместить в папку...",
             "О приложении (Удалить / Остановить)"
         )
         AlertDialog.Builder(this)
@@ -416,21 +742,34 @@ class MainActivity : Activity() {
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> removePackageFromList(if (isDock) "dock_apps" else "home_apps", app.packageName)
-                    1 -> openAppSettings(app.packageName)
+                    1 -> {
+                        removePackageFromList(if (isDock) "dock_apps" else "home_apps", app.packageName)
+                        showChooseFolderDialog(app.packageName)
+                    }
+                    2 -> openAppSettings(app.packageName)
                 }
             }
             .show()
     }
 
     private fun showHomeOptionsDialog() {
-        val options = arrayOf("Все приложения", "Сменить обои", "Настройки телефона")
+        val hiddenCount = getSavedList("hidden_apps").size
+        val options = arrayOf(
+            "Создать папку на главном экране",
+            "Скрытые приложения ($hiddenCount)",
+            "Все приложения",
+            "Сменить обои",
+            "Настройки телефона"
+        )
         AlertDialog.Builder(this)
-            .setTitle("Главный экран")
+            .setTitle("Настройки лаунчера")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> openDrawer()
-                    1 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Выбрать обои"))
-                    2 -> startActivity(Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+                    0 -> showCreateFolderDialog()
+                    1 -> showHiddenAppsDialog()
+                    2 -> openDrawer()
+                    3 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Выбрать обои"))
+                    4 -> startActivity(Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
                 }
             }
             .show()
@@ -477,15 +816,29 @@ class MainActivity : Activity() {
     private fun syncFavorites() {
         val map = allApps.associateBy { it.packageName }
 
-        // Если это первый запуск, автоматически заполним док-бар первыми 4 приложениями
         if (!prefs.contains("dock_apps") && allApps.isNotEmpty()) {
             val initialDock = allApps.take(4).map { it.packageName }
             saveList("dock_apps", initialDock)
         }
 
-        homeApps.clear()
-        for (pkg in getSavedList("home_apps")) {
-            map[pkg]?.let { homeApps.add(it) }
+        homeItems.clear()
+        for (entry in getSavedList("home_apps")) {
+            if (entry.startsWith("folder:")) {
+                val fName = entry.removePrefix("folder:")
+                val fApps = getSavedList("folder_items_$fName").mapNotNull { map[it] }
+                val fIcon = buildFolderIcon(fApps)
+                homeItems.add(
+                    AppItem(
+                        label = fName,
+                        packageName = entry,
+                        icon = fIcon,
+                        isFolder = true,
+                        folderName = fName
+                    )
+                )
+            } else {
+                map[entry]?.let { homeItems.add(it) }
+            }
         }
 
         dockApps.clear()
@@ -528,14 +881,13 @@ class MainActivity : Activity() {
 
     private fun filterApps(query: String) {
         val cleanQuery = query.trim().lowercase()
+        val hiddenSet = getSavedList("hidden_apps").toSet()
         filteredApps.clear()
-        if (cleanQuery.isEmpty()) {
-            filteredApps.addAll(allApps)
-        } else {
-            for (app in allApps) {
-                if (app.label.lowercase().contains(cleanQuery)) {
-                    filteredApps.add(app)
-                }
+
+        for (app in allApps) {
+            if (hiddenSet.contains(app.packageName)) continue
+            if (cleanQuery.isEmpty() || app.label.lowercase().contains(cleanQuery)) {
+                filteredApps.add(app)
             }
         }
         drawerAdapter.notifyDataSetChanged()
