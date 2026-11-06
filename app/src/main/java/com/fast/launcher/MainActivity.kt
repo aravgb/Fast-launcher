@@ -1,5 +1,6 @@
 package com.fast.launcher
 
+import android.accessibilityservice.AccessibilityService
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
@@ -18,6 +19,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.AlarmClock
 import android.provider.Settings
@@ -30,12 +32,34 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityEvent
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
 import java.util.concurrent.Executors
 
+// Служба для мгновенного выключения экрана двойным тапом
+class LockService : AccessibilityService() {
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onInterrupt() {}
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        instance = null
+        return super.onUnbind(intent)
+    }
+
+    companion object {
+        var instance: LockService? = null
+    }
+}
+
 data class AppItem(
-    val label: String,
+    var label: String,
+    val originalLabel: String,
     val packageName: String,
     val icon: Drawable,
     val isFolder: Boolean = false,
@@ -63,6 +87,10 @@ class MainActivity : Activity() {
     private lateinit var drawerAdapter: AppGridAdapter
     private lateinit var gestureDetector: GestureDetector
 
+    private var gridColumns = 4
+    private var iconSizeDp = 50
+    private var lastTouchOnEmptyGrid = true
+
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             loadAppsAsync()
@@ -87,6 +115,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE)
+        gridColumns = prefs.getInt("grid_columns", 4)
+        iconSizeDp = prefs.getInt("icon_size_dp", 50)
+
         setupGestures()
         setupUI()
         registerReceivers()
@@ -97,8 +128,16 @@ class MainActivity : Activity() {
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(e: MotionEvent): Boolean = false
 
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (drawerLayer.visibility != View.VISIBLE && lastTouchOnEmptyGrid) {
+                    lockScreen()
+                    return true
+                }
+                return false
+            }
+
             override fun onLongPress(e: MotionEvent) {
-                if (drawerLayer.visibility != View.VISIBLE) {
+                if (drawerLayer.visibility != View.VISIBLE && lastTouchOnEmptyGrid) {
                     showHomeOptionsDialog()
                 }
             }
@@ -126,6 +165,29 @@ class MainActivity : Activity() {
         })
     }
 
+    private fun lockScreen() {
+        val service = LockService.instance
+        if (service != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+        } else {
+            AlertDialog.Builder(this)
+                .setTitle("Выключение экрана двойным тапом")
+                .setMessage(
+                    "Для блокировки экрана включите службу «FastLauncher (Блокировка экрана)» в настройках специальных возможностей.\n\n" +
+                    "Подсказка для Redmi A3: если переключатель неактивен, зайдите в Настройки → Приложения → FastLauncher → три точки в углу → «Разрешить ограниченные настройки»."
+                )
+                .setPositiveButton("Открыть настройки") { _, _ ->
+                    try {
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                    } catch (_: Exception) {}
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+    }
+
     private fun setupUI() {
         val root = FrameLayout(this)
 
@@ -134,6 +196,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(42), dp(16), dp(16))
             setOnTouchListener { _, event ->
+                lastTouchOnEmptyGrid = true
                 gestureDetector.onTouchEvent(event)
                 true
             }
@@ -190,7 +253,7 @@ class MainActivity : Activity() {
         // Сетка ярлыков и папок на рабочем столе
         homeAdapter = AppGridAdapter(homeItems)
         homeGrid = GridView(this).apply {
-            numColumns = 4
+            numColumns = gridColumns
             verticalSpacing = dp(18)
             horizontalSpacing = dp(8)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
@@ -204,6 +267,8 @@ class MainActivity : Activity() {
             )
 
             setOnTouchListener { _, event ->
+                val pos = pointToPosition(event.x.toInt(), event.y.toInt())
+                lastTouchOnEmptyGrid = (pos == AdapterView.INVALID_POSITION)
                 gestureDetector.onTouchEvent(event)
                 false
             }
@@ -233,7 +298,7 @@ class MainActivity : Activity() {
         }
 
         val swipeHint = TextView(this).apply {
-            text = "⌃ Свайп вверх — все приложения  |  Удержание — меню"
+            text = "⌃ Свайп вверх — меню  |  2 тапа — блок экрана"
             setTextColor(Color.parseColor("#AAFFFFFF"))
             textSize = 11f
             gravity = Gravity.CENTER
@@ -275,7 +340,6 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
 
-        // Верхняя панель: Поиск + Кнопка настроек/скрытых приложений
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -340,7 +404,7 @@ class MainActivity : Activity() {
 
         drawerAdapter = AppGridAdapter(filteredApps)
         drawerGrid = GridView(this).apply {
-            numColumns = 4
+            numColumns = gridColumns
             verticalSpacing = dp(16)
             horizontalSpacing = dp(8)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
@@ -377,10 +441,87 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    // ================= НАСТРОЙКА СЕТКИ И ИКОНОК =================
+
+    private fun showGridAndIconSettingsDialog() {
+        val options = arrayOf(
+            "Сетка: 3 колонки",
+            "Сетка: 4 колонки (по умолчанию)",
+            "Сетка: 5 колонок",
+            "Иконки: Маленькие (40 dp)",
+            "Иконки: Средние (50 dp)",
+            "Иконки: Крупные (62 dp)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Сетка: $gridColumns кол. | Иконки: $iconSizeDp dp")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> updateGridAndIcons(cols = 3, sizeDp = iconSizeDp)
+                    1 -> updateGridAndIcons(cols = 4, sizeDp = iconSizeDp)
+                    2 -> updateGridAndIcons(cols = 5, sizeDp = iconSizeDp)
+                    3 -> updateGridAndIcons(cols = gridColumns, sizeDp = 40)
+                    4 -> updateGridAndIcons(cols = gridColumns, sizeDp = 50)
+                    5 -> updateGridAndIcons(cols = gridColumns, sizeDp = 62)
+                }
+            }
+            .show()
+    }
+
+    private fun updateGridAndIcons(cols: Int, sizeDp: Int) {
+        gridColumns = cols
+        iconSizeDp = sizeDp
+        prefs.edit()
+            .putInt("grid_columns", cols)
+            .putInt("icon_size_dp", sizeDp)
+            .apply()
+
+        homeGrid.numColumns = cols
+        drawerGrid.numColumns = cols
+        syncFavorites()
+        drawerAdapter.notifyDataSetChanged()
+        Toast.makeText(this, "Применено: $cols кол., $sizeDp dp", Toast.LENGTH_SHORT).show()
+    }
+
+    // ================= ПЕРЕИМЕНОВАНИЕ ЯРЛЫКОВ =================
+
+    private fun showRenameAppDialog(app: AppItem) {
+        val input = EditText(this).apply {
+            setText(app.label)
+            setSingleLine(true)
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Переименовать «${app.label}»")
+            .setView(input)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val newLabel = input.text.toString().trim()
+                if (newLabel.isNotEmpty()) {
+                    prefs.edit().putString("label_${app.packageName}", newLabel).apply()
+                    applyCustomLabelsAndRefresh()
+                }
+            }
+            .setNeutralButton("Сбросить") { _, _ ->
+                prefs.edit().remove("label_${app.packageName}").apply()
+                applyCustomLabelsAndRefresh()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun applyCustomLabelsAndRefresh() {
+        for (app in allApps) {
+            app.label = prefs.getString("label_${app.packageName}", null) ?: app.originalLabel
+        }
+        allApps.sortBy { it.label.lowercase() }
+        filterApps(searchInput.text.toString())
+        syncFavorites()
+    }
+
     // ================= РАБОТА С ПАПКАМИ =================
 
     private fun buildFolderIcon(folderApps: List<AppItem>): Drawable {
-        val size = dp(54)
+        val size = dp(iconSizeDp + 4)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
@@ -432,8 +573,9 @@ class MainActivity : Activity() {
                 if (rawName.isNotEmpty()) {
                     val folderToken = "folder:$rawName"
                     val homeList = getSavedList("home_apps")
+                    val maxHome = gridColumns * 4
                     if (!homeList.contains(folderToken)) {
-                        if (homeList.size >= 16) homeList.removeAt(0)
+                        if (homeList.size >= maxHome) homeList.removeAt(0)
                         homeList.add(folderToken)
                         saveList("home_apps", homeList)
                     }
@@ -493,7 +635,7 @@ class MainActivity : Activity() {
         var dialog: AlertDialog? = null
 
         val folderGrid = GridView(this).apply {
-            numColumns = 4
+            numColumns = minOf(gridColumns, 4)
             verticalSpacing = dp(16)
             horizontalSpacing = dp(8)
             setPadding(dp(12), dp(16), dp(12), dp(16))
@@ -713,6 +855,7 @@ class MainActivity : Activity() {
             "Добавить на главный экран",
             "Добавить в папку...",
             "Закрепить в нижней панели (Док)",
+            "Переименовать ярлык",
             "Скрыть приложение из меню",
             "О приложении (Удалить / Остановить)"
         )
@@ -720,11 +863,12 @@ class MainActivity : Activity() {
             .setTitle(app.label)
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> addPackageToList("home_apps", app.packageName, maxCount = 16)
+                    0 -> addPackageToList("home_apps", app.packageName, maxCount = gridColumns * 4)
                     1 -> showChooseFolderDialog(app.packageName)
                     2 -> addPackageToList("dock_apps", app.packageName, maxCount = 4)
-                    3 -> hideApp(app)
-                    4 -> openAppSettings(app.packageName)
+                    3 -> showRenameAppDialog(app)
+                    4 -> hideApp(app)
+                    5 -> openAppSettings(app.packageName)
                 }
             }
             .show()
@@ -735,6 +879,7 @@ class MainActivity : Activity() {
         val options = arrayOf(
             removeLabel,
             "Переместить в папку...",
+            "Переименовать ярлык",
             "О приложении (Удалить / Остановить)"
         )
         AlertDialog.Builder(this)
@@ -746,7 +891,8 @@ class MainActivity : Activity() {
                         removePackageFromList(if (isDock) "dock_apps" else "home_apps", app.packageName)
                         showChooseFolderDialog(app.packageName)
                     }
-                    2 -> openAppSettings(app.packageName)
+                    2 -> showRenameAppDialog(app)
+                    3 -> openAppSettings(app.packageName)
                 }
             }
             .show()
@@ -755,9 +901,10 @@ class MainActivity : Activity() {
     private fun showHomeOptionsDialog() {
         val hiddenCount = getSavedList("hidden_apps").size
         val options = arrayOf(
+            "Настройка сетки и иконок ($gridColumns кол., $iconSizeDp dp)",
             "Создать папку на главном экране",
             "Скрытые приложения ($hiddenCount)",
-            "Все приложения",
+            "Выключить экран (Блокировка)",
             "Сменить обои",
             "Настройки телефона"
         )
@@ -765,11 +912,12 @@ class MainActivity : Activity() {
             .setTitle("Настройки лаунчера")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> showCreateFolderDialog()
-                    1 -> showHiddenAppsDialog()
-                    2 -> openDrawer()
-                    3 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Выбрать обои"))
-                    4 -> startActivity(Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+                    0 -> showGridAndIconSettingsDialog()
+                    1 -> showCreateFolderDialog()
+                    2 -> showHiddenAppsDialog()
+                    3 -> lockScreen()
+                    4 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Выбрать обои"))
+                    5 -> startActivity(Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
                 }
             }
             .show()
@@ -830,6 +978,7 @@ class MainActivity : Activity() {
                 homeItems.add(
                     AppItem(
                         label = fName,
+                        originalLabel = fName,
                         packageName = entry,
                         icon = fIcon,
                         isFolder = true,
@@ -863,9 +1012,10 @@ class MainActivity : Activity() {
             for (ri in resolveInfos) {
                 val pkg = ri.activityInfo.packageName
                 if (pkg == myPackage) continue
-                val label = ri.loadLabel(pm).toString()
+                val origLabel = ri.loadLabel(pm).toString()
+                val customLabel = prefs.getString("label_$pkg", null) ?: origLabel
                 val icon = ri.loadIcon(pm)
-                loadedList.add(AppItem(label, pkg, icon))
+                loadedList.add(AppItem(customLabel, origLabel, pkg, icon))
             }
 
             loadedList.sortBy { it.label.lowercase() }
@@ -950,7 +1100,7 @@ class MainActivity : Activity() {
                 }
 
                 val iconView = ImageView(this@MainActivity).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(50), dp(50))
+                    layoutParams = LinearLayout.LayoutParams(dp(iconSizeDp), dp(iconSizeDp))
                     scaleType = ImageView.ScaleType.FIT_CENTER
                 }
 
@@ -975,6 +1125,15 @@ class MainActivity : Activity() {
             } else {
                 view = convertView
                 holder = view.tag as ViewHolder
+            }
+
+            // Динамическое обновление размера иконки при смене настроек
+            val targetPx = dp(iconSizeDp)
+            val lp = holder.icon.layoutParams
+            if (lp.width != targetPx || lp.height != targetPx) {
+                lp.width = targetPx
+                lp.height = targetPx
+                holder.icon.layoutParams = lp
             }
 
             val item = items[position]
