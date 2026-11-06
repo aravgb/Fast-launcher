@@ -29,10 +29,12 @@ import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityEvent
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
 import java.util.concurrent.Executors
@@ -89,6 +91,7 @@ class MainActivity : Activity() {
 
     private var gridColumns = 4
     private var iconSizeDp = 50
+    private var drawerAlphaHex = "DD" // По умолчанию полупрозрачный темный фон (DD = ~87%)
     private var lastTouchOnEmptyGrid = true
 
     private val packageReceiver = object : BroadcastReceiver() {
@@ -117,6 +120,7 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE)
         gridColumns = prefs.getInt("grid_columns", 4)
         iconSizeDp = prefs.getInt("icon_size_dp", 50)
+        drawerAlphaHex = prefs.getString("drawer_alpha", "DD") ?: "DD"
 
         setupGestures()
         setupUI()
@@ -250,7 +254,6 @@ class MainActivity : Activity() {
         clockBox.addView(dateClock)
         clockBox.addView(batteryText)
 
-        // Сетка ярлыков и папок на рабочем столе
         homeAdapter = AppGridAdapter(homeItems)
         homeGrid = GridView(this).apply {
             numColumns = gridColumns
@@ -335,7 +338,7 @@ class MainActivity : Activity() {
         // ================= 2. СЛОЙ МЕНЮ ПРИЛОЖЕНИЙ =================
         drawerLayer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#DD000000"))
+            setBackgroundColor(Color.parseColor("${drawerAlphaHex}000000"))
             setPadding(dp(12), dp(36), dp(12), dp(12))
             visibility = View.GONE
         }
@@ -363,12 +366,28 @@ class MainActivity : Activity() {
             textSize = 15f
             background = searchBg
             setSingleLine(true)
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
             setPadding(dp(16), dp(10), dp(16), dp(10))
             layoutParams = LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f
             )
+
+            // Автозапуск единственного найденного приложения по нажатию Enter / Лупы на клавиатуре
+            setOnEditorActionListener { _, actionId, event ->
+                if (actionId == EditorInfo.IME_ACTION_SEARCH ||
+                    (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+                ) {
+                    if (filteredApps.size == 1) {
+                        val targetPkg = filteredApps[0].packageName
+                        closeDrawer()
+                        launchApp(targetPkg)
+                        return@setOnEditorActionListener true
+                    }
+                }
+                false
+            }
 
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -439,6 +458,152 @@ class MainActivity : Activity() {
         root.addView(homeLayer)
         root.addView(drawerLayer)
         setContentView(root)
+    }
+
+    // ================= НАСТРОЙКА ПРОЗРАЧНОСТИ ФОНА МЕНЮ =================
+
+    private fun showDrawerAlphaSettingsDialog() {
+        val options = arrayOf(
+            "Легкое затемнение (50% прозрачности)",
+            "Стандартное затемнение (87% - по умолчанию)",
+            "Глубокое затемнение (95% прозрачности)",
+            "Черный непрозрачный фон (100%)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Прозрачность фона меню")
+            .setItems(options) { _, which ->
+                val hex = when (which) {
+                    0 -> "80"
+                    1 -> "DD"
+                    2 -> "F2"
+                    3 -> "FF"
+                    else -> "DD"
+                }
+                drawerAlphaHex = hex
+                prefs.edit().putString("drawer_alpha", hex).apply()
+                drawerLayer.setBackgroundColor(Color.parseColor("${hex}000000"))
+                Toast.makeText(this, "Прозрачность обновлена", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    // ================= ПЕРЕМЕЩЕНИЕ И СОРТИРОВКА ИКОНОК =================
+
+    private fun moveItemInList(key: String, token: String, delta: Int) {
+        val list = getSavedList(key)
+        val index = list.indexOf(token)
+        if (index == -1) return
+
+        val newIndex = index + delta
+        if (newIndex in list.indices) {
+            val temp = list[index]
+            list[index] = list[newIndex]
+            list[newIndex] = temp
+            saveList(key, list)
+            syncFavorites()
+        } else {
+            Toast.makeText(this, "Элемент уже на краю списка", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showReorderDialog(key: String, dialogTitle: String) {
+        val currentRefList = if (key == "dock_apps") dockApps else homeItems
+        if (currentRefList.isEmpty()) {
+            Toast.makeText(this, "Список пуст", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val listView = ListView(this).apply {
+            dividerHeight = dp(1)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+
+        val reorderAdapter = object : BaseAdapter() {
+            override fun getCount(): Int = currentRefList.size
+            override fun getItem(position: Int): AppItem = currentRefList[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val row = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                }
+
+                val item = currentRefList[position]
+
+                val iconView = ImageView(this@MainActivity).apply {
+                    setImageDrawable(item.icon)
+                    layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                }
+
+                val titleView = TextView(this@MainActivity).apply {
+                    text = if (item.isFolder) "📁 ${item.label}" else item.label
+                    textSize = 15f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(dp(12), 0, dp(8), 0)
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+
+                val btnBgUp = GradientDrawable().apply {
+                    setColor(Color.parseColor("#33888888"))
+                    cornerRadius = dp(8).toFloat()
+                }
+
+                val upBtn = TextView(this@MainActivity).apply {
+                    text = "▲"
+                    textSize = 16f
+                    gravity = Gravity.CENTER
+                    background = btnBgUp
+                    alpha = if (position > 0) 1f else 0.25f
+                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(38)).apply {
+                        rightMargin = dp(6)
+                    }
+                    setOnClickListener {
+                        if (position > 0) {
+                            moveItemInList(key, item.packageName, -1)
+                            notifyDataSetChanged()
+                        }
+                    }
+                }
+
+                val btnBgDown = GradientDrawable().apply {
+                    setColor(Color.parseColor("#33888888"))
+                    cornerRadius = dp(8).toFloat()
+                }
+
+                val downBtn = TextView(this@MainActivity).apply {
+                    text = "▼"
+                    textSize = 16f
+                    gravity = Gravity.CENTER
+                    background = btnBgDown
+                    alpha = if (position < currentRefList.size - 1) 1f else 0.25f
+                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(38))
+                    setOnClickListener {
+                        if (position < currentRefList.size - 1) {
+                            moveItemInList(key, item.packageName, 1)
+                            notifyDataSetChanged()
+                        }
+                    }
+                }
+
+                row.addView(iconView)
+                row.addView(titleView)
+                row.addView(upBtn)
+                row.addView(downBtn)
+                return row
+            }
+        }
+
+        listView.adapter = reorderAdapter
+
+        AlertDialog.Builder(this)
+            .setTitle(dialogTitle)
+            .setView(listView)
+            .setPositiveButton("Готово", null)
+            .show()
     }
 
     // ================= НАСТРОЙКА СЕТКИ И ИКОНОК =================
@@ -701,7 +866,11 @@ class MainActivity : Activity() {
     }
 
     private fun showFolderManageMenu(folderName: String) {
+        val folderToken = "folder:$folderName"
         val options = arrayOf(
+            "⬅ Сдвинуть папку влево / вверх",
+            "➡ Сдвинуть папку вправо / вниз",
+            "↕ Упорядочить все иконки...",
             "Выбрать приложения для папки",
             "Переименовать папку",
             "Удалить папку с экрана"
@@ -710,10 +879,13 @@ class MainActivity : Activity() {
             .setTitle("Папка «$folderName»")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> showSelectAppsForFolderDialog(folderName)
-                    1 -> showRenameFolderDialog(folderName)
-                    2 -> {
-                        removePackageFromList("home_apps", "folder:$folderName")
+                    0 -> moveItemInList("home_apps", folderToken, -1)
+                    1 -> moveItemInList("home_apps", folderToken, 1)
+                    2 -> showReorderDialog("home_apps", "Порядок на главном экране")
+                    3 -> showSelectAppsForFolderDialog(folderName)
+                    4 -> showRenameFolderDialog(folderName)
+                    5 -> {
+                        removePackageFromList("home_apps", folderToken)
                         prefs.edit().remove("folder_items_$folderName").apply()
                         syncFavorites()
                     }
@@ -875,8 +1047,14 @@ class MainActivity : Activity() {
     }
 
     private fun showHomeAppMenu(app: AppItem, isDock: Boolean) {
+        val listKey = if (isDock) "dock_apps" else "home_apps"
         val removeLabel = if (isDock) "Убрать из нижней панели" else "Убрать с главного экрана"
+        val reorderTitle = if (isDock) "Порядок в нижней панели" else "Порядок на главном экране"
+
         val options = arrayOf(
+            "⬅ Сдвинуть влево / вверх",
+            "➡ Сдвинуть вправо / вниз",
+            "↕ Упорядочить все иконки...",
             removeLabel,
             "Переместить в папку...",
             "Переименовать ярлык",
@@ -886,13 +1064,16 @@ class MainActivity : Activity() {
             .setTitle(app.label)
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> removePackageFromList(if (isDock) "dock_apps" else "home_apps", app.packageName)
-                    1 -> {
-                        removePackageFromList(if (isDock) "dock_apps" else "home_apps", app.packageName)
+                    0 -> moveItemInList(listKey, app.packageName, -1)
+                    1 -> moveItemInList(listKey, app.packageName, 1)
+                    2 -> showReorderDialog(listKey, reorderTitle)
+                    3 -> removePackageFromList(listKey, app.packageName)
+                    4 -> {
+                        removePackageFromList(listKey, app.packageName)
                         showChooseFolderDialog(app.packageName)
                     }
-                    2 -> showRenameAppDialog(app)
-                    3 -> openAppSettings(app.packageName)
+                    5 -> showRenameAppDialog(app)
+                    6 -> openAppSettings(app.packageName)
                 }
             }
             .show()
@@ -901,7 +1082,10 @@ class MainActivity : Activity() {
     private fun showHomeOptionsDialog() {
         val hiddenCount = getSavedList("hidden_apps").size
         val options = arrayOf(
+            "↕ Упорядочить иконки на главном экране",
+            "↕ Упорядочить нижнюю панель (Док)",
             "Настройка сетки и иконок ($gridColumns кол., $iconSizeDp dp)",
+            "Прозрачность фона меню",
             "Создать папку на главном экране",
             "Скрытые приложения ($hiddenCount)",
             "Выключить экран (Блокировка)",
@@ -912,12 +1096,15 @@ class MainActivity : Activity() {
             .setTitle("Настройки лаунчера")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> showGridAndIconSettingsDialog()
-                    1 -> showCreateFolderDialog()
-                    2 -> showHiddenAppsDialog()
-                    3 -> lockScreen()
-                    4 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Выбрать обои"))
-                    5 -> startActivity(Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+                    0 -> showReorderDialog("home_apps", "Порядок на главном экране")
+                    1 -> showReorderDialog("dock_apps", "Порядок в нижней панели")
+                    2 -> showGridAndIconSettingsDialog()
+                    3 -> showDrawerAlphaSettingsDialog()
+                    4 -> showCreateFolderDialog()
+                    5 -> showHiddenAppsDialog()
+                    6 -> lockScreen()
+                    7 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Выбрать обои"))
+                    8 -> startActivity(Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
                 }
             }
             .show()
@@ -1127,7 +1314,6 @@ class MainActivity : Activity() {
                 holder = view.tag as ViewHolder
             }
 
-            // Динамическое обновление размера иконки при смене настроек
             val targetPx = dp(iconSizeDp)
             val lp = holder.icon.layoutParams
             if (lp.width != targetPx || lp.height != targetPx) {
